@@ -1,0 +1,10 @@
+[package]
+name = "wss"
+version = "0.1.0"
+authors = ["Marcin <hi.marcin@icloud.com>"]
+edition = "2021"
+
+[dependencies]
+fluvio = { git = "https://github.com/infinyon/fluvio", rev = "cddc05388b7a1278837adc506430f339f311212d" }
+fluvio-connector-common = { git = "https://github.com/infinyon/fluvio", rev = "cddc05388b7a1278837adc506430f339f311212d", features = ["derive"]}
+serde = { version = "1.0", default-features = false, features = ["derive"]}
