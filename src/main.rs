@@ -1,23 +1,22 @@
 mod config;
-use config::CustomConfig;
+mod websocket;
 
-
+use config::WebSocketConfig;
 use fluvio::{RecordKey, TopicProducer};
-use fluvio_connector_common::{
-    connector,
-    Result 
-};
+use fluvio_connector_common::{connector, tracing::{debug, trace}, Result, Source};
+use futures::StreamExt;
+use websocket::WebSocketSource;
 
 #[connector(source)]
-async fn start(config: CustomConfig, producer: TopicProducer) -> Result<()> {
-    println!("Starting wss source connector with {config:?}");
-    for i in 1..1000 {
-        let value = format!("Hello, Fluvio - {i}");
-        producer.send(RecordKey::NULL, value).await?;
-        producer.flush().await?;
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+async fn start(config: WebSocketConfig, producer: TopicProducer) -> Result<()> {
+    debug!(?config);
+    let source = WebSocketSource::new(&config)?;
+    let mut stream = source.connect(None).await?;
+
+    while let Some(item) = stream.next().await {
+        trace!(?item);
+        producer.send(RecordKey::NULL, item).await?;
     }
+
     Ok(())
 }
-
-

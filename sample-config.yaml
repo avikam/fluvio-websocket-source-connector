@@ -1,8 +1,40 @@
-apiVersion: 0.1.0
 meta:
-  version: 0.1.0
-  name: my-wss-test-connector
-  type: wss-source
-  topic: test-wss-topic
-custom:
-  foo: bar
+  version: latest
+  name: my-websocket-connector
+  type: websocket-source
+  topic: websocket-topic
+websocket:
+  uri: "wss://example.com/socket"
+  protocols: []
+  connection_timeout_ms: 5000
+  headers:
+    Authorization: "Bearer YOUR_TOKEN"
+    Custom-Header: "Custom Value"
+  subscription_message: |
+    {
+      "type": "subscribe",
+      "product_ids": ["123"],
+      "channels": ["products"]
+    }
+  proxy: null
+  ssl:
+    verify: true
+    ca_path: "/path/to/cafile.pem"
+  reconnection_policy:
+    enabled: true
+    max_retries: 10
+    backoff_strategy: "exponential"
+    base_delay_ms: 1000
+    max_delay_ms: 60000
+  max_message_size: 10485760
+  frame_size_limit: 16384
+  ping_interval_ms: 5000
+  pong_timeout_ms: 10000
+  compression: false
+  origin_header: "http://client.example.com"
+  binary_type: "arraybuffer"
+  session_management: false
+  throttling_policy: null
+  qos:
+    delivery_guarantees: "at_least_once"
+  ack_confirms: false
