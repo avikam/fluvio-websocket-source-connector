@@ -1,21 +1,23 @@
-use crate::{config::WebSocketConfig, event::WebSocketEvent};
-use anyhow::{Result, Context};
+use crate::config::WebSocketFluvioConfig;
+use anyhow::{Result,Context};
 use async_trait::async_trait;
-use fluvio_connector_common::{tracing::{debug, error, info, warn}, Source};
 use fluvio::Offset;
-use futures::{stream::{BoxStream, SplitStream}, StreamExt, SinkExt};
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::time::{sleep, Duration, Instant};
-use tokio_tungstenite::{connect_async, MaybeTlsStream, tungstenite::{Error as WsError, protocol::{Message, WebSocketConfig as WsConfig}}};
+use fluvio_connector_common::{tracing::{error, debug, info}, Result as FluvioResult, Source};
+use futures::stream::LocalBoxStream;
+use futures::{stream::{ SplitStream, SplitSink}, StreamExt, SinkExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::{sleep, Duration};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, tungstenite::protocol::Message, WebSocketStream};
 
-pub(crate) struct WebSocketSource {
-    config: WebSocketConfig,
+
+pub(crate) struct WebSocketFluvioSource {
+    config: WebSocketFluvioConfig,
     stop_tx: Option<Sender<()>>,
 }
 
-impl WebSocketSource {
-    pub(crate) fn new(config: &WebSocketConfig) -> Result<Self> {
+impl WebSocketFluvioSource {
+    pub(crate) fn new(config: &WebSocketFluvioConfig) -> Result<Self> {
         Ok(Self {
             config: config.clone(),
             stop_tx: None,
@@ -26,7 +28,7 @@ impl WebSocketSource {
         let mut attempt = 0;
         while let Some(reconnection_policy) = &self.config.reconnection_policy {
             match connect_async(&self.config.uri).await {
-                Ok((ws_stream, _)) => {
+                Ok((mut ws_stream, _)) => {
                     info!("WebSocket connected to {}", self.config.uri);
                     if let Some(message) = &self.config.subscription_message {
                         ws_stream.send(Message::Text(message.clone())).await?;
@@ -36,8 +38,8 @@ impl WebSocketSource {
                 Err(e) => {
                     error!("WebSocket connection error on attempt {}: {}", attempt, e);
                     if attempt < reconnection_policy.max_retries {
-                        let delay = compute_backoff(attempt, reconnection_policy.base_delay_ms as u64, reconnection_policy.max_delay_ms as u64);
-                        sleep(Duration::from_millis(delay)).await;
+                        let delay = Self::compute_backoff(attempt, reconnection_policy.base_delay_ms as usize, reconnection_policy.max_delay_ms as usize);
+                        sleep(Duration::from_millis(delay as u64)).await;
                         attempt += 1;
                     } else {
                         break;
@@ -54,7 +56,11 @@ impl WebSocketSource {
         ))
     }
 
-    async fn read_messages(&self, mut read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>, tx: Sender<String>) {
+    async fn read_messages(
+        mut read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+        tx: Sender<String>,
+        stop_tx: Sender<()>
+    ) {
         while let Some(message_result) = read.next().await {
             match message_result {
                 Ok(message) => {
@@ -73,22 +79,19 @@ impl WebSocketSource {
                                 error!("Received binary data that could not be converted to UTF-8 text");
                             }
                         }
-                        Message::Pong(_pong) => {
+                        Message::Pong(_) => {
                             debug!("Received pong message, connection is alive");
                         }
-                        Message::Ping(ping) => {
-                            if let Err(e) = self.send_pong(&mut write).await {
-                                error!("Failed to respond to ping: {}", e);
-                                break; // Exit the reading loop, should consider reconnecting
+                        Message::Ping(_) => {
+                            if let Err(e) = tx.send("Ping received".into()).await {
+                                error!("Failed to send ping response: {}", e);
                             }
                         }
                         Message::Close(_) => {
                             info!("Received WebSocket Close frame");
                             // Signal to stop and break the loop
-                            if let Some(stop_tx) = self.stop_tx.as_ref() {
-                                let _ = stop_tx.send(()).await;
-                                break;
-                            }
+                            let _ = stop_tx.send(()).await;
+                            break;
                         }
                         _ => {
                             // Ignore other message types
@@ -98,47 +101,67 @@ impl WebSocketSource {
                 Err(e) => {
                     error!("WebSocket read error: {}", e);
                     // Depending on the error you may choose to stop and close or try to reconnect
-                    return;
+                    break;
                 }
             }
         }
     }
 
-    async fn send_pong(&self, write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<()> {
-        write.send(Message::Pong(Vec::new())).await.context("Failed to send pong")
-    }
+    // async fn send_pong(&self, write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<()> {
+    //     write.send(Message::Pong(Vec::new())).await.context("Failed to send pong")
+    // }
 
 
-    async fn ping_interval_task(&self, mut write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<()> {
-        if let Some(ping_interval) = self.config.ping_interval_ms {
+    async fn ping_interval_task(
+        mut write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+        config: WebSocketFluvioConfig,
+        stop_tx: Sender<()>
+    ) {
+        if let Some(ping_interval) = config.ping_interval_ms {
             let mut interval = tokio::time::interval(Duration::from_millis(ping_interval as u64));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-            while interval.tick().await.is_elapsed() {
-                if write.send(Message::Ping(Vec::new())).await.is_err() {
-                    error!("Failed to send ping");
-                    break; // If sending ping fails, break the loop and indicate exit
+            loop {
+                interval.tick().await;
+                match write.send(Message::Ping(Vec::new())).await {
+                    Ok(_) => {
+                        debug!("Ping sent");
+                    }
+                    Err(e) => {
+                        error!("Failed to send ping: {}", e);
+                        let _ = stop_tx.send(()).await; // Signal a stop due to ping failure
+                        break;
+                    }
                 }
             }
         }
-        Ok(())
     }
 
-    async fn reconnect_and_run(&self) -> Result<Receiver<String>> {
+
+    async fn reconnect_and_run(&mut self) -> Result<Receiver<String>> {
         let (tx, rx) = mpsc::channel::<String>(self.config.max_message_size.unwrap_or(1024));
-        let (stop_tx, stop_rx) = mpsc::channel(1);
-        self.stop_tx = Some(stop_tx);
+
+        let config = self.config.clone();
 
         loop {
             let ws_stream = self.establish_connection().await.context("Failed to establish WebSocket connection")?;
-            let (write, read) = ws_stream.split();
+            let (write_half, read_half) = ws_stream.split();
+            let read_tx = tx.clone();
+            let read_stop_tx = self.stop_tx.clone().unwrap();
+            let config_clone = config.clone();
 
-            // Start read and ping tasks concurrently.
             let read_handle = tokio::spawn(async move {
-                WebSocketSource::read_messages(read, tx.clone()).await;
+                WebSocketFluvioSource::read_messages(
+                    read_half,
+                    read_tx,
+                    read_stop_tx,
+                )
+                .await;
             });
+
+            let write_stop_tx = self.stop_tx.clone().unwrap();
             let ping_handle = tokio::spawn(async move {
-                WebSocketSource::ping_interval_task(write).await;
+                WebSocketFluvioSource::ping_interval_task(write_half, config_clone, write_stop_tx).await;
             });
 
             // Wait for any of the tasks to finish. If either finishes, we have to reconnect.
@@ -149,22 +172,18 @@ impl WebSocketSource {
                 _ = ping_handle => {
                     error!("WebSocket ping task ended, reconnecting...");
                 },
-                _ = stop_rx.recv() => {
-                    debug!("Stop signal received, closing the WebSocket connection cleanly.");
-                    break;
-                },
             };
 
             // Should not reconnect if reconnection policy is not defined.
-            if self.config.reconnection_policy.is_none() {
+            if config.reconnection_policy.is_none() {
                 debug!("Reconnection not configured, ending the source.");
                 break;
             }
 
             // Apply the backoff strategy before attempting to reconnect.
-            if let Some(ref policy) = self.config.reconnection_policy {
-                let delay = compute_backoff(0 /* reset or implement retry counter */, policy.base_delay_ms as u64, policy.max_delay_ms as u64);
-                sleep(Duration::from_millis(delay)).await;
+            if let Some(ref policy) = config.reconnection_policy {
+                let delay = Self::compute_backoff(0 /* reset or implement retry counter */, (policy.base_delay_ms as u64).try_into().unwrap(), (policy.max_delay_ms as u64).try_into().unwrap());
+                sleep(Duration::from_millis(delay.try_into().unwrap())).await;
             }
         }
 
@@ -172,18 +191,24 @@ impl WebSocketSource {
     }
 
     // Computes the backoff delay using an exponential strategy
-    fn compute_backoff(attempt: u32, base_delay_ms: u64, max_delay_ms: u64) -> u64 {
-        let exponent = 2u64.pow(attempt.min(31)); // Prevent overflow, cap exponent at 2^31
-        let delay = base_delay_ms.checked_mul(exponent).unwrap_or(u64::MAX);
+    fn compute_backoff(attempt: usize, base_delay_ms: usize, max_delay_ms: usize) -> usize {
+        let exponent = 2usize.pow(attempt.min(31) as u32); // Prevent overflow, cap exponent at 2^31
+        let delay = base_delay_ms.saturating_mul(exponent);
         delay.min(max_delay_ms)
     }
 }
 
+
+
 #[async_trait]
-impl<'a> Source<'a, String> for WebSocketSource {
-    async fn connect(mut self, _offset: Option<Offset>) -> Result<BoxStream<'a, String>> {
-        let rx = self.reconnect_and_run().await.context("Failed to run WebSocket connection")?;
-        let stream = rx.boxed();
+impl<'a> Source<'a, String> for WebSocketFluvioSource {
+    async fn connect(mut self, _offset: Option<Offset>) -> FluvioResult<LocalBoxStream<'a, String>> {
+        let rx = self
+            .reconnect_and_run()
+            .await
+            .context("Failed to run WebSocket connection")?;
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
+            .boxed();
         Ok(stream)
     }
 }
