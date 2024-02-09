@@ -2,7 +2,7 @@ use crate::config::WebSocketFluvioConfig;
 use anyhow::{Result,Context};
 use async_trait::async_trait;
 use fluvio::Offset;
-use fluvio_connector_common::{tracing::{error, debug, info}, Result as FluvioResult, Source};
+use fluvio_connector_common::{tracing::{error, debug, info}, Source};
 use futures::stream::LocalBoxStream;
 use futures::{stream::{ SplitStream, SplitSink}, StreamExt, SinkExt};
 use tokio::net::TcpStream;
@@ -202,7 +202,7 @@ impl WebSocketFluvioSource {
 
 #[async_trait]
 impl<'a> Source<'a, String> for WebSocketFluvioSource {
-    async fn connect(mut self, _offset: Option<Offset>) -> FluvioResult<LocalBoxStream<'a, String>> {
+    async fn connect(mut self, _offset: Option<Offset>) -> Result<LocalBoxStream<'a, String>> {
         let rx = self
             .reconnect_and_run()
             .await

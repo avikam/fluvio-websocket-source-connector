@@ -5,10 +5,13 @@ authors = ["Marcin <hi.marcin@icloud.com>"]
 edition = "2021"
 
 [dependencies]
+# Once moved to http-source, can be used with workspace=True
+async-std = { version = "1.12",  default-features = false, features = ["attributes", "tokio1"] }
+
 anyhow = "*"
 async-trait = "*"
-fluvio = { git = "https://github.com/infinyon/fluvio", rev = "cddc05388b7a1278837adc506430f339f311212d" }
-fluvio-connector-common = { git = "https://github.com/infinyon/fluvio", rev = "cddc05388b7a1278837adc506430f339f311212d", features = ["derive"]}
+fluvio = { git = "https://github.com/infinyon/fluvio", tag = "v0.11.3" }
+fluvio-connector-common = { git = "https://github.com/infinyon/fluvio", tag = "v0.11.3", features = ["derive"] }
 futures = "*"
 serde = { version = "1.0", default-features = false, features = ["derive"]}
 serde_derive = "*"
