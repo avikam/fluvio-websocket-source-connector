@@ -33,7 +33,7 @@ pub(crate) struct WebSocketFluvioConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub(crate) struct ReconnectionPolicy {
-    // pub(crate) enabled: bool,
+    pub(crate) enabled: bool,
     pub(crate) max_retries: usize,
     // pub(crate) backoff_strategy: String,
     pub(crate) base_delay_ms: usize,

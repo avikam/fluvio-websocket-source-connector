@@ -5,7 +5,7 @@ mod events;
 use crate::config::WebSocketFluvioConfig;
 use crate::source::WebSocketFluvioSource;
 use fluvio::{RecordKey, TopicProducer};
-use fluvio_connector_common::{connector, tracing::{debug, trace}, Result , Source};
+use fluvio_connector_common::{connector, tracing::{debug, trace, info}, Result , Source};
 use futures::StreamExt;
 
 #[connector(source)]
