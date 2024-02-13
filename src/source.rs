@@ -19,23 +19,32 @@ fn compute_backoff(attempt: usize, base_delay_ms: usize, max_delay_ms: usize) ->
     delay.min(max_delay_ms)
 }
 
+fn max_retries(config: &WebSocketFluvioConfig) -> Option<usize> {
+    config.reconnection_policy.as_ref().map(|rc| rc.max_retries)
+}
+
 async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let mut attempt = 0;
-    if let Some(ref reconnection_policy) = config.reconnection_policy {
-        while attempt < reconnection_policy.max_retries {
-            match connect_async(config.uri.as_str()).await {
-                Ok((mut ws_stream, _)) => {
-                    info!("WebSocket connected to {}", config.uri);
-                    if let Some(message) = config.subscription_message.as_ref() {
-                        ws_stream.send(Message::Text(message.to_owned())).await?;
-                    }
-                    return Ok(ws_stream);
+    loop {
+        match connect_async(config.uri.as_str()).await {
+            Ok((mut ws_stream, _)) => {
+                info!("WebSocket connected to {}", config.uri);
+                if let Some(message) = config.subscription_message.as_ref() {
+                    ws_stream.send(Message::Text(message.to_owned())).await?;
                 }
-                Err(e) => {
-                    error!("WebSocket connection error on attempt {}: {}", attempt, e);
+                return Ok(ws_stream);
+            }
+            Err(e) => {
+                error!("WebSocket connection error on attempt {}: {}", attempt, e);
+                attempt += 1;
+
+                if attempt >= max_retries(&config).unwrap_or(1) { 
+                    break
+                }
+
+                if let Some(ref reconnection_policy) = config.reconnection_policy {
                     let delay = compute_backoff(attempt, reconnection_policy.base_delay_ms as usize, reconnection_policy.max_delay_ms as usize);
                     sleep(Duration::from_millis(delay as u64)).await;
-                    attempt += 1;
                 }
             }
         }
@@ -44,7 +53,7 @@ async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocket
     Err(anyhow::Error::new(
         std::io::Error::new(
             std::io::ErrorKind::Other,
-            "Failed to establish WebSocket connection after several attempts",
+            format!("Failed to establish WebSocket connection after {} attempts", attempt),
         )
     ))
 }
@@ -92,7 +101,7 @@ async fn websocket_stream<'a> (config: WebSocketFluvioConfig) -> Result<LocalBox
                 Err(e) => {
                     error!("WebSocket read error: {}", e);
                     // Depending on the error you may choose to stop and close or try to reconnect
-                    Some("Error".to_string())
+                    None
                 }
             }
         }

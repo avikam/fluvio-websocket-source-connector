@@ -21,5 +21,3 @@ async fn start(config: WebSocketFluvioConfig, producer: TopicProducer) -> Result
 
     Ok(())
 }
-
-
