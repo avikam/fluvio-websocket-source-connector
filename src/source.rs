@@ -3,9 +3,10 @@ use anyhow::{Result,Context};
 use async_trait::async_trait;
 use fluvio::Offset;
 use fluvio_connector_common::{tracing::{error, debug, info}, Source};
-use futures::{self, stream::LocalBoxStream, SinkExt, StreamExt};
+use futures::{self, stream::{LocalBoxStream, SplitSink}, SinkExt};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
+use tokio_stream::{wrappers::IntervalStream, StreamExt};
 use tokio_tungstenite::{connect_async, MaybeTlsStream, tungstenite::protocol::Message, WebSocketStream};
 
 pub(crate) struct WebSocketFluvioSource {
@@ -58,12 +59,26 @@ async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocket
     ))
 }
 
-async fn websocket_stream<'a> (config: WebSocketFluvioConfig) -> Result<LocalBoxStream<'a, String>> {
+async fn ping(write_end: &mut SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>) -> Result<()> {
+    write_end.send(Message::Ping(Vec::new())).await
+    .map_err(|e| {
+        error!("Failed to send ping: {}", e);
+        anyhow::Error::new(e)
+    })?;
+
+    debug!("Ping sent");
+    Ok(())
+}
+
+async fn websocket_stream<'a> (config: WebSocketFluvioConfig) -> Result<(
+    SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>, 
+    LocalBoxStream<'a, String>
+)> {
     let ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>> = establish_connection(config).await
     .context("Failed to establish WebSocket connection")?;
 
-    let (_write_half, read_half) = ws_stream.split();
-    let stream = read_half.filter_map(|message_result| {
+    let (write_half, read_half) = futures::stream::StreamExt::split(ws_stream);
+    let stream = futures::stream::StreamExt::filter_map(read_half, |message_result| {
         async move {
             match message_result {
                 Ok(message) => {
@@ -106,73 +121,55 @@ async fn websocket_stream<'a> (config: WebSocketFluvioConfig) -> Result<LocalBox
             }
         }
     });
-    Ok(stream.boxed_local())
+
+    Ok((write_half, futures::stream::StreamExt::boxed_local(stream)))
 }
 
 impl WebSocketFluvioSource {
     pub(crate) fn new(config: &WebSocketFluvioConfig) -> Result<Self> {
         Ok(Self {
-            config: config.clone(),
-            // stop_tx: None,
+            config: config.clone()
         })
     }
 
-    // async fn send_pong(&self, write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>) -> Result<()> {
-    //     write.send(Message::Pong(Vec::new())).await.context("Failed to send pong")
-    // }
-
-
-    // async fn ping_interval_task(
-    //     mut write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
-    //     config: WebSocketFluvioConfig,
-    //     // stop_tx: Sender<()>
-    // ) -> LocalBoxStream<'static, ()> {
-    //     let ping_interval = config.ping_interval_ms.unwrap_or(10_000);
-
-    //     let mut interval = tokio::time::interval(Duration::from_millis(ping_interval as u64));
-    //     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    //     let interval_stream = IntervalStream::new(tokio::time::interval(Duration::from_millis(ping_interval as u64)));
-    //     interval_stream.map(move |_| {
-    //         async move {
-    //             match write.send(Message::Ping(Vec::new())).await {
-    //                 Ok(_) => {
-    //                     debug!("Ping sent");
-    //                 }
-    //                 Err(e) => {
-    //                     error!("Failed to send ping: {}", e);
-    //                     // let _ = stop_tx.send(()).await; // Signal a stop due to ping failure
-    //                     // break;
-    //                 }
-    //             };
-    //         };
-    //         ()
-    //     }).boxed_local()
-    // }
-
     async fn reconnect_and_run<'a> (self) -> Result<LocalBoxStream<'a, String>> {
+        enum StreamElement {
+            Read(String),
+            PingInterval
+        }
+
         let config_clone = self.config.clone();
 
         let repeated_websocket = Box::pin(async_stream::stream! {
             loop {
-                let mut ws_stream = websocket_stream(config_clone.clone())
+                let ping_interval = config_clone.ping_interval_ms.map(|val| val as u64).unwrap_or(10_000);
+
+                let (mut write_end, ws_stream) = websocket_stream(config_clone.clone())
                 .await
                 .unwrap();
+                
+                let mut ws_stream = ws_stream
+                    .map(|s| StreamElement::Read(s))
+                    .merge(IntervalStream::new(tokio::time::interval(Duration::from_millis(ping_interval))).map(|_| StreamElement::PingInterval));
+
                 while let Some(item) = ws_stream.next().await {
-                    yield item;
+                    match item {
+                        StreamElement::Read(s) => yield s,
+                        StreamElement::PingInterval => {
+                            let _ = ping(&mut write_end).await;
+                        }
+                    }
                 }
             }
         });
         
-        Ok(repeated_websocket.boxed_local())
+        Ok(futures::stream::StreamExt::boxed_local(repeated_websocket))
     }
 }
 
-
-
 #[async_trait]
 impl<'a> Source<'a, String> for WebSocketFluvioSource {
-    async fn connect(mut self, _offset: Option<Offset>) -> Result<LocalBoxStream<'a, String>> {
+    async fn connect(self, _offset: Option<Offset>) -> Result<LocalBoxStream<'a, String>> {
         self
             .reconnect_and_run()
             .await
