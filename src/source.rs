@@ -70,7 +70,7 @@ async fn ping(write_end: &mut SplitSink<WebSocketStream<tokio_tungstenite::Maybe
     Ok(())
 }
 
-async fn websocket_stream<'a> (config: WebSocketFluvioConfig) -> Result<(
+async fn websocket_writer_and_stream<'a> (config: WebSocketFluvioConfig) -> Result<(
     SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>, 
     LocalBoxStream<'a, String>
 )> {
@@ -144,10 +144,12 @@ impl WebSocketFluvioSource {
             loop {
                 let ping_interval = config_clone.ping_interval_ms.map(|val| val as u64).unwrap_or(10_000);
 
-                let (mut write_end, ws_stream) = websocket_stream(config_clone.clone())
-                .await
-                .unwrap();
-                
+                let ws_stream_result = websocket_writer_and_stream(config_clone.clone()).await;
+                if ws_stream_result.is_err() {
+                    break;
+                }
+                let (mut write_end, ws_stream) = ws_stream_result.unwrap();
+
                 let mut ws_stream = ws_stream
                     .map(|s| StreamElement::Read(s))
                     .merge(IntervalStream::new(tokio::time::interval(Duration::from_millis(ping_interval))).map(|_| StreamElement::PingInterval));
@@ -156,7 +158,8 @@ impl WebSocketFluvioSource {
                     match item {
                         StreamElement::Read(s) => yield s,
                         StreamElement::PingInterval => {
-                            let _ = ping(&mut write_end).await;
+                            let ping_res = ping(&mut write_end).await;
+                            if ping_res.is_err() { break; }
                         }
                     }
                 }
