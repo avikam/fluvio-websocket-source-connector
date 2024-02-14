@@ -15,6 +15,27 @@ pub(crate) struct WebSocketFluvioSource {
 
 type Transport = MaybeTlsStream<TcpStream>;
 
+#[async_trait]
+trait PingStream {
+    async fn ping(&mut self) -> Result<()>;
+}
+
+struct WSPingOnlySink(SplitSink<WebSocketStream<Transport>, Message>);
+
+#[async_trait]
+impl PingStream for WSPingOnlySink {
+    async fn ping(self: &mut Self) -> Result<()> {
+        self.0.send(Message::Ping(Vec::new())).await
+        .map_err(|e| {
+            error!("Failed to send ping: {}", e);
+            anyhow::Error::new(e)
+        })?;
+    
+        debug!("Ping sent");
+        Ok(())
+    }
+}
+
 // Computes the backoff delay using an exponential strategy
 fn compute_backoff(attempt: usize, base_delay_ms: usize, max_delay_ms: usize) -> usize {
     let exponent = 2usize.pow(attempt.min(31) as u32); // Prevent overflow, cap exponent at 2^31
@@ -61,19 +82,8 @@ async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocket
     ))
 }
 
-async fn ping(write_end: &mut SplitSink<WebSocketStream<Transport>, Message>) -> Result<()> {
-    write_end.send(Message::Ping(Vec::new())).await
-    .map_err(|e| {
-        error!("Failed to send ping: {}", e);
-        anyhow::Error::new(e)
-    })?;
-
-    debug!("Ping sent");
-    Ok(())
-}
-
 async fn websocket_writer_and_stream<'a> (config: WebSocketFluvioConfig) -> Result<(
-    SplitSink<WebSocketStream<Transport>, Message>, 
+    WSPingOnlySink, 
     LocalBoxStream<'a, String>
 )> {
     let ws_stream = establish_connection(config).await
@@ -122,7 +132,7 @@ async fn websocket_writer_and_stream<'a> (config: WebSocketFluvioConfig) -> Resu
         }
     });
 
-    Ok((write_half, futures::stream::StreamExt::boxed_local(stream)))
+    Ok((WSPingOnlySink(write_half), futures::stream::StreamExt::boxed_local(stream)))
 }
 
 impl WebSocketFluvioSource {
@@ -148,7 +158,7 @@ impl WebSocketFluvioSource {
                 if ws_stream_result.is_err() {
                     break;
                 }
-                let (mut write_end, ws_stream) = ws_stream_result.unwrap();
+                let (mut ping_only, ws_stream) = ws_stream_result.unwrap();
 
                 let mut ws_stream = ws_stream
                     .map(|s| StreamElement::Read(s))
@@ -158,7 +168,7 @@ impl WebSocketFluvioSource {
                     match item {
                         StreamElement::Read(s) => yield s,
                         StreamElement::PingInterval => {
-                            let ping_res = ping(&mut write_end).await;
+                            let ping_res = ping_only.ping().await;
                             if ping_res.is_err() { break; }
                         }
                     }
