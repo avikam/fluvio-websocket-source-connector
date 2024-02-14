@@ -13,6 +13,8 @@ pub(crate) struct WebSocketFluvioSource {
     config: WebSocketFluvioConfig,
 }
 
+type Transport = MaybeTlsStream<TcpStream>;
+
 // Computes the backoff delay using an exponential strategy
 fn compute_backoff(attempt: usize, base_delay_ms: usize, max_delay_ms: usize) -> usize {
     let exponent = 2usize.pow(attempt.min(31) as u32); // Prevent overflow, cap exponent at 2^31
@@ -24,7 +26,7 @@ fn max_retries(config: &WebSocketFluvioConfig) -> Option<usize> {
     config.reconnection_policy.as_ref().map(|rc| rc.max_retries)
 }
 
-async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocketStream<Transport>> {
     let mut attempt = 0;
     loop {
         match connect_async(config.uri.as_str()).await {
@@ -59,7 +61,7 @@ async fn establish_connection(config: WebSocketFluvioConfig) -> Result<WebSocket
     ))
 }
 
-async fn ping(write_end: &mut SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>) -> Result<()> {
+async fn ping(write_end: &mut SplitSink<WebSocketStream<Transport>, Message>) -> Result<()> {
     write_end.send(Message::Ping(Vec::new())).await
     .map_err(|e| {
         error!("Failed to send ping: {}", e);
@@ -71,10 +73,10 @@ async fn ping(write_end: &mut SplitSink<WebSocketStream<tokio_tungstenite::Maybe
 }
 
 async fn websocket_writer_and_stream<'a> (config: WebSocketFluvioConfig) -> Result<(
-    SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Message>, 
+    SplitSink<WebSocketStream<Transport>, Message>, 
     LocalBoxStream<'a, String>
 )> {
-    let ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>> = establish_connection(config).await
+    let ws_stream = establish_connection(config).await
     .context("Failed to establish WebSocket connection")?;
 
     let (write_half, read_half) = futures::stream::StreamExt::split(ws_stream);
