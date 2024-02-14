@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = [ "crates/mock-websocket-server",
     "crates/websocket-source",
     # "crates/mock-websocket-server",
 ]

@@ -1,5 +1,5 @@
 [package]
-name = "wss"
+name = "websocket-source"
 version = "0.1.0"
 authors = ["Marcin <hi.marcin@icloud.com>"]
 edition = "2021"
