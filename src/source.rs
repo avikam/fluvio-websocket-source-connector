@@ -103,8 +103,6 @@ async fn websocket_writer_and_stream<'a> (config: WebSocketFluvioConfig) -> Resu
                         }
                         Message::Close(_) => {
                             info!("Received WebSocket Close frame");
-                            // Signal to stop and break the loop
-                            // let _ = stop_tx.send(()).await;
                             None
                         }
                         _ => {

@@ -18,22 +18,6 @@ pub enum WebSocketEventError {
     ConnectionError(String),
 }
 
-// impl WebSocketEvent {
-//     pub(crate) fn new_text(text: String) -> Self {
-//         Self {
-//             message_text: Some(text),
-//             message_bytes: None,
-//         }
-//     }
-
-//     pub(crate) fn new_binary(data: Vec<u8>) -> Self {
-//         Self {
-//             message_text: None,
-//             message_bytes: Some(data),
-//         }
-//     }
-// }
-
 impl TryFrom<WebSocketEvent> for String {
     type Error = WebSocketEventError;
 
