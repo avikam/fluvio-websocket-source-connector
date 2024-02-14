@@ -1,0 +1,22 @@
+[package]
+name = "wss"
+version = "0.1.0"
+authors = ["Marcin <hi.marcin@icloud.com>"]
+edition = "2021"
+
+[dependencies]
+async-std = { workspace = true }
+serde = { workspace = true }
+
+async-stream = "0.3.5"
+anyhow = "*"
+async-trait = "*"
+fluvio = { git = "https://github.com/infinyon/fluvio", tag = "v0.11.3" }
+fluvio-connector-common = { git = "https://github.com/infinyon/fluvio", tag = "v0.11.3", features = ["derive"] }
+futures = "*"
+serde_derive = "*"
+thiserror = "*"
+tokio = { version = "*", features = ["full"] }
+tokio-stream = "0.1.8"
+tokio-tungstenite = "*"
+tungstenite = "*"
